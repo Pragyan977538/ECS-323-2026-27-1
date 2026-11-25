@@ -1,102 +1,133 @@
-# BCI-Autonomous Wheelchair Shared Control System
+# Shared control for a brain-controlled wheelchair
 
-**Pragyan Mohanty** · Roll No. 24250 · Control Systems Project
+**Pragyan Mohanty — roll 24250**
 
-This repository covers **decoder part**, the control part will be done in post midsem.
+A person imagines a movement (left hand, right hand, feet or tongue) and an EEG decoder turns it into a wheelchair command: turn left, turn right, go forward or stop. The decoder is wrong more than half the time and takes seconds to decide, so a chair that simply obeys it crashes most of the time. Instead of chasing a better decoder, this project treats it as a fixed, imperfect sensor and asks a control question: **how should control be shared between the user and an autopilot so the chair still reaches its goal safely?**
+
+### Objectives
+
+1. **Measure the decoder honestly.** Train a CSP + LDA decoder on BCI Competition IV dataset 2a (9 subjects, trained on day 1, tested on day 2) and measure what matters for control: how often it is wrong, which way it is wrong, how confident it is, and how long it takes to decide.
+2. **Turn those measurements into a model of the command channel**, so the simulated wheelchair receives commands with each subject's real errors, delays and confidence.
+3. **Compare ways of sharing control.** The motors get `u = α·u_user + (1 − α)·u_auto`; six rules for choosing the user's share α are compared over thousands of paired simulated drives. The proposed rule, `α = confidence × (1 − risk)` with risk from the time to collision, reaches the goal in 99.6% of drives.
+4. **Find the stability limit under delay.** Derive exactly how much loop delay the shared loop can tolerate for each α, and check the result by simulation.
+
+### Where the control theory is
+
+The two notebooks are mostly data science and simulation: decoding EEG, modelling the decoder, and running and analysing the wheelchair experiments. The core control-theory work is the **stability derivation** in `report/math_derivation.pdf` (typeset) and `report/math_derivation_handwritten.pdf` (my handwritten version). It covers:
+
+- a linear model of the shared loop: a damped double integrator, an LQR autopilot (gains derived by hand from the Riccati equation) and a delayed PD user;
+- the characteristic equation with the delay term `e^(−τs)`, and why Routh–Hurwitz and root locus cannot be used on it;
+- the exact delay margin `τ_max(α)`, by finding where a root can cross the imaginary axis (the delay drops out and a quadratic is left);
+- the range of α that is stable for any delay (α below about 0.44), and the same analysis for the wheelchair's heading loop;
+- checks against a Padé approximation and direct simulation of the delay equation.
+
+The main report, `report/report.pdf`, presents the whole project and all results.
 
 ---
 
-## Project objective
-This project is more about how a brain-computer interface (BCI) can be used as a command channel for a wheelchair.
-
-A BCI can decode a person's intended movement from EEG signals. However, EEG-based commands are not perfectly reliable: the decoder can make error , its confidence may not always represent its actual accuracy, and its performance can change between recording sessions.
-
-The overall project will eventually use this information to design a controller that can share control between the user's BCI command and an autonomous wheelchair controller.
-
-
-
-### reference - 
- [1] Tonin, L., & Millán, J. del R. (2021). *Noninvasive Brain–Machine Interfaces for Robotic Devices*. 
-Annual Review of Control, Robotics, and Autonomous Systems, 4, 191–214. 
-https://doi.org/10.1146/annurev-control-012720-093904 
-
-
-
-## Control architecture and  formulation 
-
-The chair gets its own autonomous controller. The command sent to the motors is a blend of the user's command and the machine's command:
+## 1. Folder map
 
 ```
-u = α · u_BCI + (1 − α) · u_auto        0 ≤ α ≤ 1
+pragyan_24250/
+├── README.md                  this file
+├── requirements.txt           exact package versions
+├── src/
+│   ├── part1_decoder.ipynb    Part 1 (run first)
+│   ├── part2_shared_control.ipynb   Part 2 (run second)
+│   ├── evaluate.py            Part 1 numbers without Jupyter (optional)
+│   └── decoder/               decoder code used by Part 1
+│       ├── data.py            loads BCI IV 2a through MOABB, 8–30 Hz filter, epochs
+│       ├── pipeline.py        CSP + LDA, Platt calibration, run_subject()
+│       └── metrics.py         ECE, reliability curve, decision latency
+├── logs/
+│   ├── decoder_models/        trained decoder for each subject (subject_01.joblib … subject_09.joblib)
+│   ├── part1_run.log          Part 1 summary numbers
+│   └── part2_run.log          Part 2 headline numbers
+├── results/
+│   ├── part1/
+│   │   ├── summary_by_subject.csv   accuracy, kappa, ECE, latency per subject
+│   │   ├── decoder_traces.csv       one row per test trial (input to Part 2)
+│   │   └── figures/                 9 figures (incl. raw EEG)
+│   └── part2/
+│       ├── episodes.csv             log of all 32,400 simulated drives (input to Part 2)
+│       ├── figures/                 17 figures (01_… to 17_…)
+│       └── tables/                  11 CSV tables behind the report's results
+└── report/
+    ├── report.pdf             the main report: all results
+    ├── math_derivation.pdf    the stability derivations, step by step
+    ├── math_derivation_handwritten.pdf   handwritten version of the derivation
+    └── report.tex, math_derivation.tex   LaTeX sources (figures are read from results/)
 ```
 
-The wheelchair is driven by a blend of two commands: the user's decoded command and the command of an autonomous navigation controller. A single authority parameter α, sets the share each one gets. rather than improvising decoder efficiency (i.e improving alpha),   it will be adapted online from two signals. The first is the decoder's calibrated confidence, which estimates whether the command is what the user intended. The second is a situational risk measure based on time-to-collision, which estimates how costly an error would be at that moment. The planned framework uses LQR and the Dynamic Window Approach for the autonomous layer. It adds hysteresis and rate limiting so α changes smoothly, and a frequency-domain analysis of how much loop delay the system can tolerate as a function of α. This part of the work is in progress.
+`logs/` and `results/` already hold the outputs of our run; running the notebooks again regenerates them.
 
-## Data
+---
 
-BCI Competition IV, dataset 2a (also distributed as BNCI2014_001):
+## 2. Setup and run
 
-- 9 subjects, 22 EEG channels, 250 Hz
-- 4 imagined movements: left hand, right hand, feet, tongue
-- 2 sessions per subject recorded on different days, 288 trials per session
+**Dataset.** [BCI Competition IV dataset 2a](https://www.bbci.de/competition/iv/) (Graz motor imagery: 9 subjects, 4 classes, 22 EEG channels at 250 Hz, two sessions on different days). Description: [desc_2a.pdf](https://www.bbci.de/competition/iv/desc_2a.pdf). No manual download is needed: Part 1 fetches it through MOABB as [`BNCI2014_001`](https://neurotechx.github.io/moabb/generated/moabb.datasets.BNCI2014_001.html) on the first run, about 780 MB (18 `.mat` files) into `~/mne_data`; later runs reuse it.
 
-Each class is mapped to a wheelchair command: left hand → turn left, right hand → turn right, feet → forward, tongue → stop.
-
-- **Dataset:** https://www.bbci.de/competition/iv/#dataset2a
-- **Dataset Collection and Experimental Protocol** - https://www.bbci.de/competition/iv/desc_2a.pdf
-
-## Progress and implemenation
-
- currently the repository contains only the decoder pipeline where we analyse the accuracy, confidence , Calibration quality ECE, Confusion matrix, Cohen's κ (kappa) , Cohen's κ (kappa) from the bci datasets. 
- 
- the next phase we use these saved outputs of the decoder to build the model for bci channel for capturing how often it is wrong, in which direction, and with what delay. On top of that model, the authority share equation  will be designed, including the autonomous controller, an authority parameter α that adapts to decoder confidence and situational risk, and a stability analysis of the delayed feedback loop, all evaluated in simulation.
- 
-
-## Repository structure
-
-
-```
-├── stage_1.ipynb           the whole pipeline + figures
-├── summary_by_subject.csv  per-subject results
-├── figures/                all figures (made by the notebook)
-├── requirements.txt
-└── .gitignore
-```
-the structure  is tentative and will change as control and simulation module will be added.
-
-
-## Run
+Python 3.12 or 3.13. From this folder:
 
 ```bash
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-python -m src.decoder.run_stage1
 ```
 
+Run the notebooks in order (Part 2 uses files written by Part 1):
 
-## Remaining Work
+```bash
+jupyter nbconvert --to notebook --execute --inplace src/part1_decoder.ipynb --ExecutePreprocessor.timeout=-1
+jupyter nbconvert --to notebook --execute --inplace src/part2_shared_control.ipynb --ExecutePreprocessor.timeout=-1
+```
 
-1. **BCI channel model.** Fit a per-subject Markov error model and latency distribution from the Stage 1 outputs.
-2. **Plant and operator models.** Implement the wheelchair and double-integrator plants and the delayed-PD operator.
-3. **Autonomous controllers.** Implement LQR and the Dynamic Window Approach with obstacle avoidance.
-4. **Arbitration policies.** Implement fixed blending, confidence-only, and risk-gated adaptive allocation, $\alpha = c(1 - r)$.
-5. **Stability analysis.** Derive $\tau_{\max}(\alpha)$ and $\alpha^*$, and verify them numerically.
-6. **Simulation study.** Compare all policies across 9 subjects, 3 environments, and 20 random seeds on success rate, collision rate, and retained user authority.
-7. **Final report.** Consolidate results, ablations, and limitations.
+The notebooks can also be opened in Jupyter and run top to bottom; they find the project folder on their own. `python -m src.evaluate` reproduces Part 1's per-subject numbers without Jupyter.
 
-## Stage 1 Results
+---
 
-Cross-session evaluation on **BNCI2014_001** (Train: Day 1, Test: Day 2, 4 classes, chance = 0.25)[cite: 3]:
+## 3. Results
 
-| Subject | Raw Acc | Calib. Acc | $\kappa$ | ECE Raw | ECE Calib. | Median Latency (s) | Censored |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **S1** | 0.576 | 0.556 | 0.407 | 0.138 | 0.150 | 2.00 | 0.12 |
-| **S2** | 0.611 | 0.556 | 0.407 | 0.150 | 0.075 | 3.55 | 0.46 |
-| **S3** | 0.708 | 0.691 | 0.588 | 0.146 | 0.044 | 2.00 | 0.02 |
-| **S4** | 0.389 | 0.389 | 0.185 | 0.142 | 0.077 | 4.00 | 1.00 |
-| **S5** | 0.312 | 0.191 | -0.079 | 0.148 | 0.144 | 4.00 | 0.92 |
-| **S6** | 0.368 | 0.378 | 0.171 | 0.188 | 0.030 | 4.00 | 0.83 |
-| **S7** | 0.469 | 0.396 | 0.194 | 0.299 | 0.188 | 2.00 | 0.02 |
-| **S8** | 0.535 | 0.497 | 0.329 | 0.091 | 0.094 | 3.70 | 0.40 |
-| **S9** | 0.378 | 0.337 | 0.116 | 0.157 | 0.063 | 4.00 | 0.99 |
-| **Mean** | **0.483** | **0.443** | **0.258** | **0.162** | **0.096** | **—** | **0.53** |
+The run logs (`logs/part1_run.log`, `logs/part2_run.log`) collect the main numbers.
 
+**Part 1: decoder (report Section 3, Table 3)**
+
+| Quantity | Value | File |
+|---|---|---|
+| Mean calibrated accuracy (chance = 0.25) | 0.443 | `results/part1/summary_by_subject.csv` |
+| Mean Cohen's kappa | 0.258 | same |
+| Mean ECE, calibrated | 0.096 | same |
+| Mean ECE, raw (two ways of scoring it; both in Table 3) | 0.162 / 0.196 | `summary_by_subject.csv` / `logs/part1_run.log` |
+
+**Part 2: shared control (report Section 5)**
+
+| Quantity | Value | File | Report |
+|---|---|---|---|
+| Success, user only | 0.119 | `tables/headline_main.csv` | Table 5 |
+| Success, autopilot only | 1.000 | same | same |
+| Success, adaptive (risk-gated) | 0.996 | same | same |
+| Mean authority given to the user, adaptive | 0.118 | same | same |
+| Adaptive minus user only, subject-level 95% CI | 0.878 [0.791, 0.957] | `tables/paired_subject_level.csv` | Table 6 |
+| Subjects with significant error bursts | 0 of 9 | `logs/part2_run.log` | Section 4.1 |
+| Pooled confidence AUC | 0.676 | `logs/part2_run.log` | Section 4.1 |
+
+**Stability (report Section 6, Table 8; derivation in `math_derivation.pdf`)**
+
+| Quantity | Value | File |
+|---|---|---|
+| LQR gains K1, K2 | 3.162, 1.885 | `logs/part2_run.log` |
+| τ_max at α = 1 | 0.529 s | `tables/tau_max_formula_vs_simulation.csv` |
+| Delay-independent below α* | 0.441 | `logs/part2_run.log` |
+| Heading loop: α*, τ_max(1) | 0.613, 0.647 s | `logs/part2_run.log` |
+| Formula vs direct DDE simulation | agree to better than 1e-5 (relative) | `tables/tau_max_formula_vs_simulation.csv` |
+
+All figures are in `results/part1/figures/` and `results/part2/figures/`; Part 2 file names carry the notebook section they come from (e.g. `14_s6_…` is from Section 6).
+
+---
+
+## 4. Notes
+
+- **Saved drive log.** The full set of experiments is 32,400 simulated drives, saved in `results/part2/episodes.csv`. Part 2 analyses that log and, as a check, re-simulates 72 drives from scratch (notebook Section 6.4); they match the log to about one part in 10⁹.
+- **Two raw-ECE values.** 0.162 scores the uncalibrated confidence against the raw prediction, 0.196 against the calibrated prediction (the decision the wheelchair uses). Both are printed in Part 1 and shown in the report.
+- **Reproducibility.** Seeds are fixed (decoder 20260901, simulation 0–19). Decoder numbers match exactly; continuous simulation values can differ in the 9th significant digit on another machine, which does not change any reported number.
+- **PDFs** can be rebuilt with `pdflatex` in `report/` (run twice per file); figures are read directly from `results/`.
